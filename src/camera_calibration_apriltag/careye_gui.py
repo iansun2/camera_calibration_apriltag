@@ -16,6 +16,7 @@ adjustable maximum speed, and the calibration controls / result readout.
 """
 
 import math
+import threading
 
 import numpy
 import rclpy
@@ -152,6 +153,7 @@ class XYCoverageWidget(QWidget):
 class RosBridge(QObject):
     """Marshals data from ROS worker threads onto the Qt GUI thread."""
     frame_ready = Signal(object)
+    data_saved = Signal(str)
 
 
 class CarEyeGui(QMainWindow):
@@ -168,6 +170,7 @@ class CarEyeGui(QMainWindow):
 
         self.node.display_callback = self.bridge.frame_ready.emit
         self.bridge.frame_ready.connect(self.on_frame)
+        self.bridge.data_saved.connect(self._on_data_saved)
 
         # Joystick state + a steady publish timer (acts as a soft deadman:
         # released joystick re-centres and we keep publishing zeros).
@@ -266,13 +269,20 @@ class CarEyeGui(QMainWindow):
         self.btn_sample.clicked.connect(self.on_take_sample)
         self.btn_remove = QPushButton("Remove last")
         self.btn_remove.clicked.connect(self.on_remove_sample)
+        self.btn_save_data = QPushButton("SAVE DATA")
+        self.btn_save_data.setToolTip(
+            "Save images, tag detections and base poses for offline testing")
+        self.btn_save_data.clicked.connect(self.on_save_data)
+        self.btn_save_data.setEnabled(False)
         self.btn_calibrate = QPushButton("CALIBRATE")
         self.btn_calibrate.clicked.connect(self.on_calibrate)
-        self.btn_save = QPushButton("SAVE")
+        self.btn_save = QPushButton("SAVE RESULT")
+        self.btn_save.setToolTip("Save the computed base_link->camera extrinsic")
         self.btn_save.clicked.connect(self.on_save)
         self.btn_save.setEnabled(False)
         action_layout.addWidget(self.btn_sample)
         action_layout.addWidget(self.btn_remove)
+        action_layout.addWidget(self.btn_save_data)
         action_layout.addWidget(self.btn_calibrate)
         action_layout.addWidget(self.btn_save)
         self.lbl_result = QLabel("No calibration yet.")
@@ -344,11 +354,36 @@ class CarEyeGui(QMainWindow):
             self.statusBar().showMessage("No sample-able pose right now.", 3000)
             return
         self._refresh_coverage()
+        self.btn_save_data.setEnabled(True)
         self.statusBar().showMessage("Took sample %d." % n, 2000)
 
     def on_remove_sample(self):
         self.node.remove_last_sample()
         self._refresh_coverage()
+        self.btn_save_data.setEnabled(len(self.node.samples) > 0)
+
+    def on_save_data(self):
+        if not self.node.samples:
+            return
+        n = len(self.node.samples)
+        self.btn_save_data.setEnabled(False)
+        self.statusBar().showMessage("Saving %d samples..." % n)
+
+        def worker():
+            try:
+                path = self.node.save_data()
+            except Exception as e:   # noqa: BLE001 - surface any IO failure
+                path = "ERROR: %s" % e
+            self.bridge.data_saved.emit(path or "")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_data_saved(self, path):
+        self.btn_save_data.setEnabled(len(self.node.samples) > 0)
+        if path.startswith("ERROR:"):
+            self.statusBar().showMessage("Save data failed: %s" % path[6:], 6000)
+        elif path:
+            self.statusBar().showMessage("Saved data to %s" % path, 6000)
 
     def on_calibrate(self):
         n = len(self.node.samples)

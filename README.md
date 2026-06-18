@@ -157,11 +157,18 @@ detections.
 - **Drive (cmd_vel)** — a virtual **joystick**: forward/back → `linear.x`,
   left/right → `angular.z`, scaled by the adjustable **Max linear** / **Max
   angular** spin boxes (differential drive).
-- **TAKE SAMPLE / Remove last / CALIBRATE / SAVE** — accumulate samples,
-  solve, and write `/tmp/careye_calibration.yaml` (quaternion, RPY, and a
-  ready-to-paste `static_transform_publisher` line). The result shows the
+- **TAKE SAMPLE / Remove last / CALIBRATE / SAVE RESULT** — accumulate
+  samples, solve, and write `/tmp/careye_calibration.yaml` (quaternion, RPY,
+  and a ready-to-paste `static_transform_publisher` line). The result shows the
   `base_link → camera` transform plus a self-consistency **residual** (the
   spread of the recovered static grid pose across samples).
+- **SAVE DATA** — dump the raw inputs of every collected sample to
+  `/tmp/careye_data_<timestamp>/` for offline testing: one `frame-XXXX.png` per
+  sample plus a `careye_data.json` holding the camera intrinsics, board
+  geometry, the auto-detected corner order, and per sample the base pose
+  (`odom → base_link`, translation + quaternion) and the AprilTag detections
+  (id + 4 image corners). Enough to re-run PnP and the hand-eye solve without a
+  live system.
 
 ### Quick start
 

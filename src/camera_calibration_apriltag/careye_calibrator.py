@@ -335,6 +335,9 @@ class CarEyeCalibrationNode(Node):
             self.get_logger().warn('cv_bridge failed: %s' % e, once=True)
             bgr = None
 
+        # Keep the raw image (pre-overlay) for offline replay/saving.
+        raw = bgr.copy() if bgr is not None else None
+
         pose = self._grid_pose(tags_msg.detections)
         if bgr is not None:
             self._draw_overlay(bgr, tags_msg.detections, pose)
@@ -374,6 +377,12 @@ class CarEyeCalibrationNode(Node):
             'g2b': (R_g2b, t_g2b),
             't2c': (R_t2c, t_t2c),
             'x': frame.base_x, 'y': frame.base_y, 'yaw': frame.base_yaw,
+            # Raw inputs retained for offline replay (SAVE DATA).
+            'image': raw,
+            'detections': [
+                {'id': int(d.id), 'family': d.family,
+                 'corners': [[float(c.x), float(c.y)] for c in d.corners]}
+                for d in tags_msg.detections],
         }
         self._publish(frame, candidate)
 
@@ -408,6 +417,67 @@ class CarEyeCalibrationNode(Node):
     def camera_frame(self):
         """Best guess at the camera optical frame name."""
         return self._camera_frame or self._info_frame or 'camera'
+
+    def save_data(self, directory=None):
+        """
+        Write the raw inputs of every sample to ``directory`` for offline
+        replay: the camera image, the AprilTag detections (id + corners) and
+        the base pose (``odom_T_base_link``), plus the camera intrinsics and
+        board geometry.  Returns the directory path, or None if no samples.
+        """
+        import datetime
+        import json
+        import os
+
+        if not self.samples:
+            return None
+        if directory is None:
+            stamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+            directory = os.path.join('/tmp', 'careye_data_%s' % stamp)
+        os.makedirs(directory, exist_ok=True)
+
+        with self._info_lock:
+            K = self._K.tolist() if self._K is not None else None
+            D = self._D.reshape(-1).tolist() if self._D is not None else None
+            info_frame = self._info_frame
+
+        meta = {
+            'camera_info': {'frame_id': info_frame, 'K': K, 'D': D},
+            'board': {
+                'cols': self._board.n_cols, 'rows': self._board.n_rows,
+                'tag_size': self._board.tag_size,
+                'tag_spacing': self._board.tag_spacing,
+                'start_id': self._board.start_id,
+                'family': self._board.family,
+            },
+            'frames': {'odom': self._odom_frame, 'base_link': self._base_frame,
+                       'camera': self.camera_frame()},
+            'corner_perm': list(self._corner_perm) if self._corner_perm else None,
+            'samples': [],
+        }
+
+        for i, s in enumerate(self.samples):
+            entry = {'index': i}
+            img = s.get('image')
+            if img is not None:
+                fname = 'frame-%04d.png' % i
+                cv2.imwrite(os.path.join(directory, fname), img)
+                entry['image'] = fname
+            # odom_T_base_link as translation + quaternion (w last).
+            R_g2b, t_g2b = s['g2b']
+            qw, qx, qy, qz = tfs.quaternions.mat2quat(R_g2b)
+            entry['base_pose'] = {
+                'translation': [float(t_g2b[0]), float(t_g2b[1]), float(t_g2b[2])],
+                'rotation': [float(qx), float(qy), float(qz), float(qw)],
+            }
+            entry['detections'] = s.get('detections', [])
+            meta['samples'].append(entry)
+
+        with open(os.path.join(directory, 'careye_data.json'), 'w') as f:
+            json.dump(meta, f, indent=2)
+        self.get_logger().info(
+            'Saved %d samples to %s' % (len(self.samples), directory))
+        return directory
 
     def publish_cmd(self, linear_x, angular_z):
         msg = Twist()
