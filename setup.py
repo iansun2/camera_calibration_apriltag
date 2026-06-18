@@ -32,6 +32,7 @@ setup(
     entry_points={
         'console_scripts': [
             'cameracalibrator = camera_calibration_apriltag.nodes.cameracalibrator:main',
+            'carcalibrator = camera_calibration_apriltag.nodes.carcalibrator:main',
         ],
     },
 )

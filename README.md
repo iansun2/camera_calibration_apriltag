@@ -101,6 +101,125 @@ namespace (e.g. `image` → `/<camera>/image_raw`, `tags` → `/<camera>/tags`).
 `TimeSynchronizer` (exact) or `ApproximateTimeSynchronizer` (when
 `approximate > 0`).
 
+## Car-eye calibration (`carcalibrator`)
+
+In addition to camera *intrinsic* calibration, this package provides a
+**car-eye** tool that calibrates the **extrinsic** transform between a camera
+and the body of a mobile base — i.e. where the camera sits on the car.
+
+A car (`base_link`) drives around in a static world frame (`odom`) while a
+rigidly mounted camera observes a **static** AprilGrid. This is the classic
+eye-in-hand calibration problem `AX = XB`, solved with
+`cv2.calibrateHandEye`:
+
+| Symbol | Meaning | Source |
+|--------|---------|--------|
+| `A` | base motion, `odom → base_link` | tf (odometry) |
+| `B` | camera motion vs target, `camera → grid` | `solvePnP` over the detected tags |
+| `X` | **`base_link → camera`** (the unknown) | solver output |
+
+```
+odom ──tf──► base_link        AprilGrid (static)
+                 └── camera ──detections──► apriltag detector ──tags──► carcalibrator
+```
+
+> **Planar-motion caveat:** a car driving on a flat floor only rotates about
+> (parallel) vertical axes, which makes hand-eye calibration partly degenerate
+> (camera height and yaw are weakly observable). Drive with as much variety as
+> the platform allows — ramps, tilts, or tilting the grid — and watch the
+> **residual** the tool reports.
+
+### Topics and services
+
+| Direction | Name | Type | Description |
+|-----------|------|------|-------------|
+| Subscribe | `image` | `sensor_msgs/msg/Image` | image for the live view (synced with `tags`) |
+| Subscribe | `tags` | `apriltag_msgs/msg/AprilTagDetectionArray` | grid detections |
+| Subscribe | `camera_info` | `sensor_msgs/msg/CameraInfo` | intrinsics for `solvePnP` |
+| tf | `odom → base_link` | — | base pose, looked up at the detection stamp |
+| Publish | `cmd_vel` | `geometry_msgs/msg/Twist` | velocity command from the GUI joystick |
+
+`image` and `tags` are time-synchronized (`ApproximateTimeSynchronizer`, slop
+`--approximate`, default 0.05 s; pass `0` for exact) so the overlay matches the
+detections.
+
+### GUI
+
+- **Live detection view** — the camera image with detected tag outlines and ids
+  overlaid, plus the AprilGrid's 3D pose drawn as RGB axes (X red, Y green,
+  Z out of the board).
+- **Coverage**
+  - *Base position (top-down X-Y)* — heatmap of where in `odom` samples were
+    taken; auto-fits to the area driven.
+  - *Heading (yaw)* — 1D coverage bar over the full circle.
+- **Live** — status, tags in view, base pose, **grid pose in the camera frame**
+  (xyz + roll/pitch/yaw), grid range, PnP reprojection error, sample count.
+- **Drive (cmd_vel)** — a virtual **joystick**: forward/back → `linear.x`,
+  left/right → `angular.z`, scaled by the adjustable **Max linear** / **Max
+  angular** spin boxes (differential drive).
+- **TAKE SAMPLE / Remove last / CALIBRATE / SAVE** — accumulate samples,
+  solve, and write `/tmp/careye_calibration.yaml` (quaternion, RPY, and a
+  ready-to-paste `static_transform_publisher` line). The result shows the
+  `base_link → camera` transform plus a self-consistency **residual** (the
+  spread of the recovered static grid pose across samples).
+
+### Quick start
+
+```bash
+ros2 launch camera_calibration_apriltag careye_calibrate.launch.py \
+    size:=7x5 tag_size:=0.035 tag_spacing:=0.040 \
+    image_rect:=/camera/image_rect camera_info:=/camera/camera_info \
+    odom_frame:=odom base_frame:=base_link cmd_vel:=/cmd_vel
+```
+
+Or run the node directly against a detector you start yourself:
+
+```bash
+ros2 run camera_calibration_apriltag carcalibrator \
+    --size 7x5 --tag-size 0.035 --tag-spacing 0.040 \
+    --odom-frame odom --base-frame base_link \
+    --ros-args -r image:=/camera/image_rect -r tags:=/camera/tags \
+               -r camera_info:=/camera/camera_info -r cmd_vel:=/cmd_vel
+```
+
+The launch file wires up the
+[`apriltag_ros`](https://github.com/christianrauch/apriltag_ros) detector
+(`apriltag_node`, subscribing to `image_rect`/`camera_info`, publishing
+`detections`). Set `run_detector:=false` to use your own.
+
+### `carcalibrator` CLI options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-s`, `--size` | `8x6` | board size as `COLSxROWS` in tags |
+| `--tag-size` | `0.030` | tag edge length (meters) |
+| `--tag-spacing` | `0.03375` | tag centre-to-centre distance (meters) |
+| `--start-id` | `0` | id of the top-left tag |
+| `--tag-family` | `""` (any) | accept only this tag family |
+| `--min-tags` | `1` | minimum tags required for a grid pose |
+| `--require-all-tags` | off | require the full board for a pose |
+| `--odom-frame` | `odom` | static world frame |
+| `--base-frame` | `base_link` | moving car body frame |
+| `--camera-frame` | `""` | camera optical frame (empty = from `camera_info`) |
+| `--tf-timeout` | `0.2` | seconds to wait for the `odom → base` tf at a stamp |
+| `--approximate` | `0.05` | image/tags sync slop (seconds); `0` = exact |
+
+### `careye_calibrate.launch.py` arguments
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `image_rect` | `/camera/image_rect` | rectified image fed to the detector |
+| `camera_info` | `/camera/camera_info` | intrinsics topic |
+| `tags` | `/camera/tags` | tag detections topic |
+| `cmd_vel` | `/cmd_vel` | velocity command topic for the joystick |
+| `run_detector` | `true` | also launch the `apriltag_ros` detector |
+| `detector_family` | `36h11` | tag family for the detector |
+| `size`/`tag_size`/`tag_spacing`/`start_id` | `8x6`/`0.030`/`0.03375`/`0` | board geometry |
+| `tag_family` | `""` | family filter for the calibrator (empty = any) |
+| `min_tags` | `1` | minimum tags for a grid pose |
+| `odom_frame`/`base_frame`/`camera_frame` | `odom`/`base_link`/`""` | frames |
+| `tf_timeout` | `0.2` | tf wait at a stamp (seconds) |
+
 ## AprilGrid target
 
 A regular `COLS x ROWS` grid of square AprilTags. Tag ids increase **row-major**
