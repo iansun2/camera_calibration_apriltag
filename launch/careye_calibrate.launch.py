@@ -94,9 +94,9 @@ def generate_launch_description():
         LaunchArg('detector_family', default_value='36h11',
                   description='tag family for the apriltag_ros detector'),
         # --- AprilTag board geometry ---
-        LaunchArg('size', default_value='8x6', description='board size as COLSxROWS in tags'),
+        LaunchArg('size', default_value='7x5', description='board size as COLSxROWS in tags'),
         LaunchArg('tag_size', default_value='0.030', description='tag edge length (meters)'),
-        LaunchArg('tag_spacing', default_value='0.03375',
+        LaunchArg('tag_spacing', default_value='0.035',
                   description='tag centre-to-centre distance (meters)'),
         LaunchArg('start_id', default_value='0', description='id of the top-left tag'),
         LaunchArg('tag_family', default_value='',

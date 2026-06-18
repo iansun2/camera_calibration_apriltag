@@ -291,7 +291,10 @@ class CarEyeCalibrationNode(Node):
             frame.image = bgr
 
         if pose is None:
-            frame.status = "no grid pose (need camera_info + >= %d tags)" % self._min_tags
+            with self._info_lock:
+                have_info = self._K is not None
+            frame.status = ("no camera_info yet" if not have_info
+                            else "no grid (need ≥%d tags)" % self._min_tags)
             self._publish(frame, None)
             return
 
@@ -306,7 +309,7 @@ class CarEyeCalibrationNode(Node):
 
         base = self._base_pose(tags_msg.header.stamp)
         if base is None:
-            frame.status = "no tf %s -> %s" % (self._odom_frame, self._base_frame)
+            frame.status = "no tf %s→%s" % (self._odom_frame, self._base_frame)
             self._publish(frame, None)
             return
 

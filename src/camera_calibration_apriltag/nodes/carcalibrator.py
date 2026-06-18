@@ -22,7 +22,7 @@ coverage and a joystick that drives the platform via ``cmd_vel``.
 Example::
 
     ros2 run camera_calibration_apriltag carcalibrator \\
-        --size 7x5 --tag-size 0.035 --tag-spacing 0.040 \\
+        --size 7x5 --tag-size 0.030 --tag-spacing 0.035 \\
         --odom-frame odom --base-frame base_link \\
         --ros-args -r image:=/camera/image_rect -r tags:=/camera/tags \\
                    -r camera_info:=/camera/camera_info -r cmd_vel:=/cmd_vel
@@ -42,11 +42,11 @@ def main():
         description="AprilTag grid car-eye (camera-to-base) calibration.")
 
     group = OptionGroup(parser, "AprilTag Board Options")
-    group.add_option("-s", "--size", type="string", default="8x6",
+    group.add_option("-s", "--size", type="string", default="7x5",
                      help="board size as COLSxROWS in tags (default %default)")
     group.add_option("--tag-size", type="float", default=0.030,
                      help="edge length of a tag in meters (default %default)")
-    group.add_option("--tag-spacing", type="float", default=0.03375,
+    group.add_option("--tag-spacing", type="float", default=0.035,
                      help="centre-to-centre distance between tags in meters (default %default)")
     group.add_option("--start-id", type="int", default=0,
                      help="id of the top-left tag (default %default)")

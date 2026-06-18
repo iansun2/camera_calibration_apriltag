@@ -22,7 +22,7 @@ through a PySide6 GUI.
 Example (monocular)::
 
     ros2 run camera_calibration_apriltag cameracalibrator \\
-        --size 8x6 --tag-size 0.030 --tag-spacing 0.03375 \\
+        --size 7x5 --tag-size 0.030 --tag-spacing 0.035 \\
         --ros-args -r image:=/camera/image_raw -r tags:=/camera/tags
 """
 
@@ -49,11 +49,11 @@ def main():
                       help="calibrate a stereo pair (left/left_tags, right/right_tags)")
 
     group = OptionGroup(parser, "AprilTag Board Options")
-    group.add_option("-s", "--size", type="string", default="8x6",
+    group.add_option("-s", "--size", type="string", default="7x5",
                      help="board size as COLSxROWS in tags (default %default)")
     group.add_option("--tag-size", type="float", default=0.030,
                      help="edge length of a tag in meters (default %default)")
-    group.add_option("--tag-spacing", type="float", default=0.03375,
+    group.add_option("--tag-spacing", type="float", default=0.035,
                      help="centre-to-centre distance between tags in meters (default %default)")
     group.add_option("--start-id", type="int", default=0,
                      help="id of the top-left tag (default %default)")
@@ -106,7 +106,7 @@ def main():
     try:
         n_cols, n_rows = (int(c) for c in options.size.split('x'))
     except ValueError:
-        parser.error("--size must be of the form COLSxROWS, e.g. 8x6")
+        parser.error("--size must be of the form COLSxROWS, e.g. 7x5")
 
     board = ApriltagBoard(n_cols=n_cols, n_rows=n_rows,
                           tag_size=options.tag_size, tag_spacing=options.tag_spacing,

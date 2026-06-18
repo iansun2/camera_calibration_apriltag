@@ -205,9 +205,17 @@ class CarEyeGui(QMainWindow):
         left.addWidget(cov_box, 1)
 
         status_box = QGroupBox("Live")
-        status_form = QFormLayout(status_box)
+        status_outer = QVBoxLayout(status_box)
+        # Status sits outside the form grid with a fixed height and a width it
+        # never asks to grow, so long/short messages can't reflow the panel.
         self.lbl_status = QLabel("waiting for detections...")
         self.lbl_status.setWordWrap(True)
+        self.lbl_status.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        self.lbl_status.setFixedHeight(2 * self.lbl_status.fontMetrics().height() + 6)
+        self.lbl_status.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        status_outer.addWidget(self.lbl_status)
+
+        status_form = QFormLayout()
         self.lbl_tags = QLabel("0")
         self.lbl_pose = QLabel("-")
         self.lbl_grid_t = QLabel("-")
@@ -215,14 +223,14 @@ class CarEyeGui(QMainWindow):
         self.lbl_range = QLabel("-")
         self.lbl_reproj = QLabel("-")
         self.lbl_samples = QLabel("0")
-        status_form.addRow("Status:", self.lbl_status)
         status_form.addRow("Tags in view:", self.lbl_tags)
         status_form.addRow("Base x,y,yaw:", self.lbl_pose)
         status_form.addRow("Grid xyz (cam, m):", self.lbl_grid_t)
         status_form.addRow("Grid rpy (cam, deg):", self.lbl_grid_rpy)
         status_form.addRow("Grid range (m):", self.lbl_range)
-        status_form.addRow("Reproj (px):", self.lbl_reproj)
+        status_form.addRow("Reproj RMS (px):", self.lbl_reproj)
         status_form.addRow("Samples:", self.lbl_samples)
+        status_outer.addLayout(status_form)
         left.addWidget(status_box)
 
         root.addLayout(left, 1)

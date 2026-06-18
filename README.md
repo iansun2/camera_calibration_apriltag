@@ -53,7 +53,7 @@ Monocular, against a running camera (`/camera/image_raw`) and detector:
 
 ```bash
 ros2 launch camera_calibration_apriltag calibrate.launch.py \
-    size:=7x5 tag_size:=0.035 tag_spacing:=0.040 \
+    size:=7x5 tag_size:=0.030 tag_spacing:=0.035 \
     camera:=camera image:=image_raw
 ```
 
@@ -61,7 +61,7 @@ Stereo:
 
 ```bash
 ros2 launch camera_calibration_apriltag calibrate_stereo.launch.py \
-    size:=7x5 tag_size:=0.035 tag_spacing:=0.040 \
+    size:=7x5 tag_size:=0.030 tag_spacing:=0.035 \
     left_camera:=left_camera right_camera:=right_camera
 ```
 
@@ -69,7 +69,7 @@ Run the node directly (you wire the topics yourself):
 
 ```bash
 ros2 run camera_calibration_apriltag cameracalibrator \
-    --size 7x5 --tag-size 0.035 --tag-spacing 0.040 \
+    --size 7x5 --tag-size 0.030 --tag-spacing 0.035 \
     --ros-args -r image:=/camera/image_raw -r tags:=/camera/tags
 ```
 
@@ -167,7 +167,7 @@ detections.
 
 ```bash
 ros2 launch camera_calibration_apriltag careye_calibrate.launch.py \
-    size:=7x5 tag_size:=0.035 tag_spacing:=0.040 \
+    size:=7x5 tag_size:=0.030 tag_spacing:=0.035 \
     image_rect:=/camera/image_rect camera_info:=/camera/camera_info \
     odom_frame:=odom base_frame:=base_link cmd_vel:=/cmd_vel
 ```
@@ -176,7 +176,7 @@ Or run the node directly against a detector you start yourself:
 
 ```bash
 ros2 run camera_calibration_apriltag carcalibrator \
-    --size 7x5 --tag-size 0.035 --tag-spacing 0.040 \
+    --size 7x5 --tag-size 0.030 --tag-spacing 0.035 \
     --odom-frame odom --base-frame base_link \
     --ros-args -r image:=/camera/image_rect -r tags:=/camera/tags \
                -r camera_info:=/camera/camera_info -r cmd_vel:=/cmd_vel
@@ -191,9 +191,9 @@ The launch file wires up the
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `-s`, `--size` | `8x6` | board size as `COLSxROWS` in tags |
+| `-s`, `--size` | `7x5` | board size as `COLSxROWS` in tags |
 | `--tag-size` | `0.030` | tag edge length (meters) |
-| `--tag-spacing` | `0.03375` | tag centre-to-centre distance (meters) |
+| `--tag-spacing` | `0.035` | tag centre-to-centre distance (meters) |
 | `--start-id` | `0` | id of the top-left tag |
 | `--tag-family` | `""` (any) | accept only this tag family |
 | `--min-tags` | `1` | minimum tags required for a grid pose |
@@ -214,7 +214,7 @@ The launch file wires up the
 | `cmd_vel` | `/cmd_vel` | velocity command topic for the joystick |
 | `run_detector` | `true` | also launch the `apriltag_ros` detector |
 | `detector_family` | `36h11` | tag family for the detector |
-| `size`/`tag_size`/`tag_spacing`/`start_id` | `8x6`/`0.030`/`0.03375`/`0` | board geometry |
+| `size`/`tag_size`/`tag_spacing`/`start_id` | `7x5`/`0.030`/`0.035`/`0` | board geometry |
 | `tag_family` | `""` | family filter for the calibrator (empty = any) |
 | `min_tags` | `1` | minimum tags for a grid pose |
 | `odom_frame`/`base_frame`/`camera_frame` | `odom`/`base_link`/`""` | frames |
@@ -236,8 +236,8 @@ row4 28  29  30  31  32  33  34
 
 - `tag_size` — edge length of one tag, in meters.
 - `tag_spacing` — **centre-to-centre** distance between neighbouring tags, in
-  meters (not the gap between tags). For 35 mm tags with a 5 mm gap,
-  `tag_spacing = 0.040`.
+  meters (not the gap between tags). For 30 mm tags with a 5 mm gap,
+  `tag_spacing = 0.035`.
 
 ## GUI
 
@@ -272,9 +272,9 @@ Pass these as plain CLI args (ROS remaps go after `--ros-args`).
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `-s`, `--size` | `8x6` | board size as `COLSxROWS` in tags |
+| `-s`, `--size` | `7x5` | board size as `COLSxROWS` in tags |
 | `--tag-size` | `0.030` | tag edge length (meters) |
-| `--tag-spacing` | `0.040` | tag centre-to-centre distance (meters) |
+| `--tag-spacing` | `0.035` | tag centre-to-centre distance (meters) |
 | `--start-id` | `0` | id of the top-left tag |
 | `--tag-family` | `""` (any) | accept only this tag family; empty accepts any |
 | `--min-tags` | `1` | minimum tags required to use a view |
@@ -326,9 +326,9 @@ Pass these as plain CLI args (ROS remaps go after `--ros-args`).
 | `type` | `umich` | detector type (`umich`, `mit`) |
 | `image_transport` | `raw` | input image transport |
 | `num_threads` | `4` | detector worker threads |
-| `size` | `8x6` | board size as `COLSxROWS` in tags |
+| `size` | `7x5` | board size as `COLSxROWS` in tags |
 | `tag_size` | `0.030` | tag edge length (meters) |
-| `tag_spacing` | `0.03375` | tag centre-to-centre distance (meters) |
+| `tag_spacing` | `0.035` | tag centre-to-centre distance (meters) |
 | `start_id` | `0` | id of the top-left tag |
 | `tag_family` | `tf36h11` | tag family (used by both detector and calibrator) |
 | `min_tags` | `1` | minimum tags required to use a view |
