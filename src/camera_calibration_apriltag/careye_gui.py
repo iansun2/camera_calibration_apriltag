@@ -26,7 +26,8 @@ from PySide6.QtWidgets import (QApplication, QDoubleSpinBox, QFormLayout, QFrame
                                QPushButton, QSizePolicy, QVBoxLayout, QWidget)
 
 from camera_calibration_apriltag.careye_hand_eye import (
-    MIN_SAMPLES, compute_residual, matrix_to_transform_tuple, solve_hand_eye)
+    MIN_SAMPLES, compute_residual, matrix_to_transform_tuple,
+    rotation_axis_rank, solve_hand_eye)
 # Reuse the colormap, heatmap cell renderer and image converter from the
 # intrinsics GUI.
 from camera_calibration_apriltag.qt_gui import (
@@ -364,14 +365,19 @@ class CarEyeGui(QMainWindow):
         self._result = X
         (tx, ty, tz), (qx, qy, qz, qw) = matrix_to_transform_tuple(X)
         rpy = numpy.degrees(_mat_to_rpy(X))
+        warn = ""
+        if rotation_axis_rank(self.node.samples) < 2:
+            warn = ("\n⚠ motion rotates about one axis only (near-planar); "
+                    "result is unreliable — add pitch/roll or tilt the grid.")
         self.lbl_result.setText(
             "base_link -> %s\n"
             "xyz:  %.4f  %.4f  %.4f  (m)\n"
             "rpy:  %.2f  %.2f  %.2f  (deg)\n"
             "quat: %.4f %.4f %.4f %.4f\n"
-            "residual: %.4f m / %.2f deg  (%d samples)"
+            "residual: %.4f m / %.2f deg  (%d samples)%s"
             % (self.node.camera_frame(), tx, ty, tz, rpy[0], rpy[1], rpy[2],
-               qx, qy, qz, qw, res['translation_rms'], res['rotation_rms'], n))
+               qx, qy, qz, qw, res['translation_rms'], res['rotation_rms'],
+               n, warn))
         self.btn_save.setEnabled(True)
 
     def on_save(self):

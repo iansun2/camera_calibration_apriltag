@@ -89,6 +89,43 @@ def matrix_to_transform_tuple(M):
             (float(qx), float(qy), float(qz), float(qw)))
 
 
+def _finite_samples(samples):
+    """Drop samples whose poses contain NaN/inf (bad tf or PnP)."""
+    out = []
+    for s in samples:
+        vals = (s['g2b'][0], s['g2b'][1], s['t2c'][0], s['t2c'][1])
+        if all(np.all(np.isfinite(v)) for v in vals):
+            out.append(s)
+    return out
+
+
+def rotation_axis_rank(samples, min_angle_deg=2.0, rel_tol=0.1):
+    """
+    Number of independent axes the base rotates about across the samples.
+
+    Hand-eye calibration is only well-posed when the motion rotates about at
+    least two non-parallel axes.  A ground vehicle on a flat floor rotates only
+    about the vertical axis (rank 1) -> the solve is degenerate.  Antiparallel
+    axes (``+z`` / ``-z``) count as one direction.
+    """
+    Rs = [s['g2b'][0] for s in samples]
+    axes = []
+    for R in Rs[1:]:
+        R_rel = Rs[0].T @ R
+        ang = np.arccos(np.clip((np.trace(R_rel) - 1.0) / 2.0, -1.0, 1.0))
+        if np.degrees(ang) < min_angle_deg:
+            continue
+        rvec, _ = cv2.Rodrigues(R_rel)
+        ax = rvec.reshape(3)
+        norm = np.linalg.norm(ax)
+        if norm > 1e-9:
+            axes.append(ax / norm)
+    if len(axes) < 2:
+        return len(axes)
+    sv = np.linalg.svd(np.array(axes), compute_uv=False)
+    return int(np.sum(sv > rel_tol * sv[0]))
+
+
 def solve_hand_eye(samples, algorithm='Park'):
     """
     Solve for ``base_link_T_camera`` from a list of samples.
@@ -96,19 +133,39 @@ def solve_hand_eye(samples, algorithm='Park'):
     :param samples: list of dicts, each with
         ``'g2b'`` = (R, t) for ``odom_T_base_link`` and
         ``'t2c'`` = (R, t) for ``camera_T_grid``.
-    :param algorithm: key into :data:`AVAILABLE_ALGORITHMS`.
+    :param algorithm: preferred key into :data:`AVAILABLE_ALGORITHMS`; other
+        algorithms are tried as fallbacks if it fails to converge.
     :returns: 4x4 ``base_link_T_camera`` transform.
+    :raises ValueError: if no algorithm produces a finite result (usually
+        degenerate, near-planar motion).
     """
+    samples = _finite_samples(samples)
     if len(samples) < MIN_SAMPLES:
-        raise ValueError("need at least %d samples, have %d"
+        raise ValueError("need at least %d valid samples, have %d"
                          % (MIN_SAMPLES, len(samples)))
-    method = AVAILABLE_ALGORITHMS[algorithm]
     Rg = [s['g2b'][0] for s in samples]
     tg = [s['g2b'][1] for s in samples]
     Rc = [s['t2c'][0] for s in samples]
     tc = [s['t2c'][1] for s in samples]
-    R_c2g, t_c2g = cv2.calibrateHandEye(Rg, tg, Rc, tc, method=method)
-    return Rt_to_matrix(R_c2g, t_c2g)
+
+    order = [algorithm] + [a for a in AVAILABLE_ALGORITHMS if a != algorithm]
+    for alg in order:
+        try:
+            R_c2g, t_c2g = cv2.calibrateHandEye(
+                Rg, tg, Rc, tc, method=AVAILABLE_ALGORITHMS[alg])
+        except (cv2.error, np.linalg.LinAlgError):
+            continue
+        X = Rt_to_matrix(R_c2g, t_c2g)
+        if np.all(np.isfinite(X)):
+            return X
+
+    rank = rotation_axis_rank(samples)
+    msg = "hand-eye solve did not converge"
+    if rank < 2:
+        msg += (": the base rotates about only one axis (near-planar driving). "
+                "Hand-eye needs rotation about >=2 non-parallel axes — add "
+                "pitch/roll (ramps, bumps) or tilt the AprilGrid target.")
+    raise ValueError(msg)
 
 
 def compute_residual(samples, X):
@@ -124,10 +181,12 @@ def compute_residual(samples, X):
     """
     positions = []
     quats = []
-    for s in samples:
+    for s in _finite_samples(samples):
         odom_T_base = Rt_to_matrix(*s['g2b'])
         cam_T_grid = Rt_to_matrix(*s['t2c'])
         odom_T_grid = odom_T_base @ X @ cam_T_grid
+        if not np.all(np.isfinite(odom_T_grid)):
+            continue
         positions.append(odom_T_grid[:3, 3])
         q = tfs.quaternions.mat2quat(odom_T_grid[:3, :3])
         # Fix sign ambiguity so quaternions cluster instead of cancelling.
@@ -135,6 +194,8 @@ def compute_residual(samples, X):
             q = -q
         quats.append(q)
 
+    if not positions:
+        return {'translation_rms': float('nan'), 'rotation_rms': float('nan')}
     positions = np.asarray(positions)
     trans_rms = float(np.sqrt(np.mean(np.sum(
         (positions - positions.mean(axis=0)) ** 2, axis=1))))
