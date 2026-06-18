@@ -64,6 +64,9 @@ def main():
     group.add_option("--allow-partial-board", action="store_true", default=False,
                      help="accept samples that do not contain every tag of the board; "
                      "by default a sample requires the full board to be detected")
+    group.add_option("--max-views", type="int", default=0,
+                     help="cap the number of views used by the solver (0 = use all); "
+                     "fewer views calibrate much faster on slow/ARM CPUs")
     parser.add_option_group(group)
 
     group = OptionGroup(parser, "ROS Communication Options")
@@ -166,7 +169,8 @@ def main():
                            camera_name=options.camera_name,
                            max_chessboard_speed=options.max_chessboard_speed,
                            queue_size=options.queue_size, min_tags=options.min_tags,
-                           require_all_tags=not options.allow_partial_board)
+                           require_all_tags=not options.allow_partial_board,
+                           max_views=options.max_views)
     run_gui(node, stereo=options.stereo)
 
 

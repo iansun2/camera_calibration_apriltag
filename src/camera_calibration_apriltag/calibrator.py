@@ -193,7 +193,8 @@ class Calibrator():
     """Base class for the AprilTag-based calibration system."""
 
     def __init__(self, board, flags=0, fisheye_flags=0, name='',
-                 max_chessboard_speed=-1.0, min_tags=1, require_all_tags=True):
+                 max_chessboard_speed=-1.0, min_tags=1, require_all_tags=True,
+                 max_views=0):
         self.board = board
         self.calibrated = False
         self.calib_flags = flags
@@ -214,6 +215,10 @@ class Calibrator():
         # every collected sample contributes all tags to the solver.
         self.require_all_tags = require_all_tags
         self.expected_tags = board.num_tags
+        # Cap on the number of views fed to the solver (0 = use all). Fewer
+        # views means a much faster (single-threaded) solve with little loss of
+        # accuracy once coverage is good.
+        self.max_views = int(max_views)
         # RMS reprojection error reported by the solver after calibration.
         self.calibration_rms = None
         # Per-tag corner permutation chosen automatically at calibration time.
@@ -224,24 +229,50 @@ class Calibrator():
         """
         Find the per-tag corner ordering that best matches the detector output.
 
-        Runs a fast pinhole calibration for each candidate permutation and
-        returns the one with the lowest RMS reprojection error.  This makes the
-        result independent of whichever corner convention the AprilTag detector
-        uses.
+        Each candidate permutation is scored with a per-view planar homography
+        fit (the board is planar, so the correct ordering yields a near-perfect
+        homography while wrong orderings do not).  This is far cheaper than
+        running a full ``calibrateCamera`` per permutation, which matters a lot
+        on single-core / ARM machines.  A subset of views is enough to decide.
         """
-        best_perm, best_rms = CORNER_PERMS[0], float('inf')
+        n = len(opts)
+        # Evaluate on at most ~20 evenly spaced views to keep it fast.
+        step = max(1, n // 20)
+        subset = list(range(0, n, step))
+
+        best_perm, best_err = CORNER_PERMS[0], float('inf')
         for perm in CORNER_PERMS:
-            opts_p = [permute_objpoints(o, perm) for o in opts]
-            try:
-                rms, _, _, _, _ = cv2.calibrateCamera(
-                    opts_p, ipts, self.size, numpy.eye(3), None,
-                    flags=cv2.CALIB_FIX_K3)
-            except cv2.error:
-                continue
-            if rms < best_rms:
-                best_perm, best_rms = perm, rms
-        print("auto-selected corner order %s (RMS=%.4f px)" % (best_perm, best_rms))
+            total_sq, n_pts = 0.0, 0
+            for i in subset:
+                op = permute_objpoints(opts[i], perm).reshape(-1, 3)[:, :2]
+                ip = ipts[i].reshape(-1, 2)
+                if len(ip) < 4:
+                    continue
+                H, _ = cv2.findHomography(op.astype(numpy.float32),
+                                          ip.astype(numpy.float32), 0)
+                if H is None:
+                    continue
+                proj = cv2.perspectiveTransform(
+                    op.reshape(-1, 1, 2).astype(numpy.float64), H).reshape(-1, 2)
+                total_sq += float(numpy.sum((proj - ip) ** 2))
+                n_pts += len(ip)
+            err = math.sqrt(total_sq / n_pts) if n_pts else float('inf')
+            if err < best_err:
+                best_perm, best_err = perm, err
+        print("auto-selected corner order %s (homography residual=%.3f px, "
+              "%d views)" % (best_perm, best_err, len(subset)))
         return best_perm
+
+    def subsample_views(self, items):
+        """Evenly subsample ``items`` to at most ``self.max_views`` entries."""
+        n = len(items)
+        if self.max_views and n > self.max_views:
+            idx = numpy.linspace(0, n - 1, self.max_views).round().astype(int)
+            chosen = [items[i] for i in sorted(set(idx.tolist()))]
+            print("using %d of %d views for calibration (max_views=%d)"
+                  % (len(chosen), n, self.max_views))
+            return chosen
+        return items
 
     def enough_tags_for_sample(self, num_tags):
         """True if a view with ``num_tags`` matched tags may become a sample."""
@@ -501,8 +532,11 @@ class MonoCalibrator(Calibrator):
 
         if self.camera_model == CAMERA_MODEL.PINHOLE:
             print("mono pinhole calibration...")
+            # CALIB_USE_LU speeds up the per-iteration linear solve (the LM
+            # solver itself is single-threaded in OpenCV).
             reproj_err, self.intrinsics, dist_coeffs, rvecs, tvecs = cv2.calibrateCamera(
-                opts, ipts, self.size, intrinsics_in, None, flags=self.calib_flags)
+                opts, ipts, self.size, intrinsics_in, None,
+                flags=self.calib_flags | cv2.CALIB_USE_LU)
             if self.calib_flags & cv2.CALIB_RATIONAL_MODEL:
                 self.distortion = dist_coeffs.flat[:8].reshape(-1, 1)
             else:
@@ -644,7 +678,7 @@ class MonoCalibrator(Calibrator):
             raise CalibrationException("No samples collected, cannot calibrate")
         if self.db:
             self.size = (self.db[0][1].shape[1], self.db[0][1].shape[0])
-        self.cal_fromcorners(self.good_corners)
+        self.cal_fromcorners(self.subsample_views(self.good_corners))
         self.calibrated = True
         self.report()
         print(self.ost())
@@ -906,7 +940,7 @@ class StereoCalibrator(Calibrator):
         if not self.good_corners:
             raise CalibrationException("No samples collected, cannot calibrate")
         self.size = (self.db[0][1].shape[1], self.db[0][1].shape[0])
-        self.cal_fromcorners(self.good_corners)
+        self.cal_fromcorners(self.subsample_views(self.good_corners))
         self.calibrated = True
         self.report()
         print(self.ost())
