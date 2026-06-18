@@ -155,7 +155,7 @@ Pass these as plain CLI args (ROS remaps go after `--ros-args`).
 |--------|---------|-------------|
 | `-s`, `--size` | `8x6` | board size as `COLSxROWS` in tags |
 | `--tag-size` | `0.030` | tag edge length (meters) |
-| `--tag-spacing` | `0.03375` | tag centre-to-centre distance (meters) |
+| `--tag-spacing` | `0.040` | tag centre-to-centre distance (meters) |
 | `--start-id` | `0` | id of the top-left tag |
 | `--tag-family` | `""` (any) | accept only this tag family; empty accepts any |
 | `--min-tags` | `1` | minimum tags required to use a view |
