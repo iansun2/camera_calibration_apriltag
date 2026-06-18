@@ -47,6 +47,8 @@ def launch_setup(context, *args, **kwargs):
             'type': LaunchConfig('type'),
             'tag_family': LaunchConfig('tag_family'),
             'image_transport': LaunchConfig('image_transport'),
+            'num_threads': '4',
+            # 'max_allowed_hamming_distance': '2'
         }.items(),
     )
 

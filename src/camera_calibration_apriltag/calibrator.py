@@ -170,7 +170,7 @@ class Calibrator():
     """Base class for the AprilTag-based calibration system."""
 
     def __init__(self, board, flags=0, fisheye_flags=0, name='',
-                 max_chessboard_speed=-1.0, min_tags=1):
+                 max_chessboard_speed=-1.0, min_tags=1, require_all_tags=True):
         self.board = board
         self.calibrated = False
         self.calib_flags = flags
@@ -187,7 +187,19 @@ class Calibrator():
         self.last_frame_tags = None
         self.max_chessboard_speed = max_chessboard_speed
         self.min_tags = max(1, int(min_tags))
+        # Only accept a view as a sample when the full board is detected, so
+        # every collected sample contributes all tags to the solver.
+        self.require_all_tags = require_all_tags
+        self.expected_tags = board.num_tags
+        # RMS reprojection error reported by the solver after calibration.
+        self.calibration_rms = None
         self.size = None
+
+    def enough_tags_for_sample(self, num_tags):
+        """True if a view with ``num_tags`` matched tags may become a sample."""
+        if self.require_all_tags:
+            return num_tags >= self.expected_tags
+        return num_tags >= self.min_tags
 
     # -- image conversion --------------------------------------------------- #
     def mkgray(self, msg):
@@ -450,6 +462,9 @@ class MonoCalibrator(Calibrator):
             reproj_err, self.intrinsics, self.distortion, rvecs, tvecs = cv2.fisheye.calibrate(
                 opts, ipts, self.size, intrinsics_in, None, flags=self.fisheye_calib_flags)
 
+        self.calibration_rms = float(reproj_err)
+        print("mono calibration RMS reprojection error: %.4f px" % self.calibration_rms)
+
         # R is identity for monocular calibration
         self.R = numpy.eye(3, dtype=numpy.float64)
         self.P = numpy.zeros((3, 4), dtype=numpy.float64)
@@ -553,7 +568,7 @@ class MonoCalibrator(Calibrator):
             scrib = cv2.cvtColor(scrib_mono, cv2.COLOR_GRAY2BGR)
             if tags:
                 self.draw_tags(scrib, tags, x_scale, y_scale, color=(0, 255, 0))
-            if image_points is not None:
+            if image_points is not None and self.enough_tags_for_sample(len(ids)):
                 params = self.get_parameters(image_points, (gray.shape[1], gray.shape[0]))
                 if self.is_good_sample(params, tags, self.last_frame_tags):
                     self.db.append((params, gray))
@@ -660,23 +675,26 @@ class StereoCalibrator(Calibrator):
 
         if self.camera_model == CAMERA_MODEL.PINHOLE:
             print("stereo pinhole calibration...")
-            cv2.stereoCalibrate(opts, lipts, ripts,
-                                self.l.intrinsics, self.l.distortion,
-                                self.r.intrinsics, self.r.distortion,
-                                self.size, self.R, self.T,
-                                criteria=(cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 1, 1e-5),
-                                flags=flags)
+            result = cv2.stereoCalibrate(opts, lipts, ripts,
+                                         self.l.intrinsics, self.l.distortion,
+                                         self.r.intrinsics, self.r.distortion,
+                                         self.size, self.R, self.T,
+                                         criteria=(cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 1, 1e-5),
+                                         flags=flags)
         elif self.camera_model == CAMERA_MODEL.FISHEYE:
             print("stereo fisheye calibration...")
             lipts = numpy.asarray(lipts, dtype=numpy.float64)
             ripts = numpy.asarray(ripts, dtype=numpy.float64)
             opts = numpy.asarray(opts, dtype=numpy.float64)
-            cv2.fisheye.stereoCalibrate(opts, lipts, ripts,
-                                        self.l.intrinsics, self.l.distortion,
-                                        self.r.intrinsics, self.r.distortion,
-                                        self.size, self.R, self.T,
-                                        criteria=(cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 1, 1e-5),
-                                        flags=flags)
+            result = cv2.fisheye.stereoCalibrate(opts, lipts, ripts,
+                                                 self.l.intrinsics, self.l.distortion,
+                                                 self.r.intrinsics, self.r.distortion,
+                                                 self.size, self.R, self.T,
+                                                 criteria=(cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 1, 1e-5),
+                                                 flags=flags)
+        # The first return value of (fisheye.)stereoCalibrate is the RMS error.
+        self.calibration_rms = float(result[0])
+        print("stereo calibration RMS reprojection error: %.4f px" % self.calibration_rms)
         self.set_alpha(0.0)
 
     def set_alpha(self, a):
@@ -777,7 +795,7 @@ class StereoCalibrator(Calibrator):
                 self.draw_tags(lscrib, ltags, x_scale, y_scale)
             if rtags:
                 self.draw_tags(rscrib, rtags, x_scale, y_scale)
-            if lipts is not None:
+            if lipts is not None and self.enough_tags_for_sample(len(common)):
                 params = self.get_parameters(lipts, (lgray.shape[1], lgray.shape[0]))
                 if self.is_good_sample(params, ltags, self.last_frame_tags):
                     self.db.append((params, lgray, rgray))

@@ -83,7 +83,7 @@ class CalibrationNode(Node):
     def __init__(self, name, board, stereo=False, service_check=True,
                  synchronizer=message_filters.TimeSynchronizer, flags=0,
                  fisheye_flags=0, camera_name='', max_chessboard_speed=-1,
-                 queue_size=1, min_tags=1):
+                 queue_size=1, min_tags=1, require_all_tags=True):
         super().__init__(name)
 
         self._board = board
@@ -93,6 +93,7 @@ class CalibrationNode(Node):
         self._camera_name = camera_name
         self._max_chessboard_speed = max_chessboard_speed
         self._min_tags = min_tags
+        self._require_all_tags = require_all_tags
 
         # Hook set by the GUI; called with a drawable for every processed frame.
         self.display_callback = None
@@ -153,7 +154,8 @@ class CalibrationNode(Node):
 
     def _make_calibrator(self, cls):
         kwargs = dict(flags=self._calib_flags, fisheye_flags=self._fisheye_calib_flags,
-                      max_chessboard_speed=self._max_chessboard_speed, min_tags=self._min_tags)
+                      max_chessboard_speed=self._max_chessboard_speed, min_tags=self._min_tags,
+                      require_all_tags=self._require_all_tags)
         if self._camera_name:
             kwargs['name'] = self._camera_name
         return cls(self._board, **kwargs)

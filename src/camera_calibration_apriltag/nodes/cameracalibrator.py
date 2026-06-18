@@ -61,6 +61,9 @@ def main():
                      help="tag family to accept; empty accepts any (default any)")
     group.add_option("--min-tags", type="int", default=1,
                      help="minimum number of tags required to use a view (default %default)")
+    group.add_option("--allow-partial-board", action="store_true", default=False,
+                     help="accept samples that do not contain every tag of the board; "
+                     "by default a sample requires the full board to be detected")
     parser.add_option_group(group)
 
     group = OptionGroup(parser, "ROS Communication Options")
@@ -162,7 +165,8 @@ def main():
                            flags=calib_flags, fisheye_flags=fisheye_calib_flags,
                            camera_name=options.camera_name,
                            max_chessboard_speed=options.max_chessboard_speed,
-                           queue_size=options.queue_size, min_tags=options.min_tags)
+                           queue_size=options.queue_size, min_tags=options.min_tags,
+                           require_all_tags=not options.allow_partial_board)
     run_gui(node, stereo=options.stereo)
 
 

@@ -16,6 +16,7 @@ this GUI through Qt signals (which marshal safely onto the GUI thread).
 """
 
 import threading
+import time
 
 import cv2
 import numpy
@@ -55,6 +56,12 @@ class CalibrationGui(QMainWindow):
         self.stereo = stereo
         self.bridge = RosBridge()
 
+        # Coverage bars only ever increase, so remember the best value reached.
+        self._bar_max = {name: 0 for name in self.PARAM_NAMES}
+        # Live FPS estimate (exponential moving average of frame intervals).
+        self._last_frame_time = None
+        self._fps = 0.0
+
         self.setWindowTitle("AprilTag Camera Calibration" + (" (stereo)" if stereo else ""))
         self._build_ui()
 
@@ -88,8 +95,10 @@ class CalibrationGui(QMainWindow):
         # Control panel
         panel = QVBoxLayout()
 
+        self.fps_label = QLabel("FPS: --")
         self.samples_label = QLabel("Samples: 0")
         self.tags_label = QLabel("Tags in view: 0")
+        panel.addWidget(self.fps_label)
         panel.addWidget(self.samples_label)
         panel.addWidget(self.tags_label)
 
@@ -107,6 +116,9 @@ class CalibrationGui(QMainWindow):
 
         self.error_label = QLabel("Reprojection error: --")
         panel.addWidget(self.error_label)
+
+        self.rms_label = QLabel("Final calibration RMS: --")
+        panel.addWidget(self.rms_label)
 
         model_box = QGroupBox("Camera model")
         model_layout = QVBoxLayout(model_box)
@@ -153,8 +165,20 @@ class CalibrationGui(QMainWindow):
             label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
         label.setPixmap(pix)
 
+    def _update_fps(self):
+        now = time.monotonic()
+        if self._last_frame_time is not None:
+            dt = now - self._last_frame_time
+            if dt > 0:
+                inst = 1.0 / dt
+                # Exponential moving average for a stable readout.
+                self._fps = inst if self._fps == 0.0 else 0.9 * self._fps + 0.1 * inst
+        self._last_frame_time = now
+        self.fps_label.setText("FPS: %.1f" % self._fps)
+
     @Slot(object)
     def on_drawable(self, drawable):
+        self._update_fps()
         c = self.node.c
         if self.stereo:
             if drawable.lscrib is not None:
@@ -169,11 +193,13 @@ class CalibrationGui(QMainWindow):
         if c is not None:
             self.samples_label.setText("Samples: %d" % len(c.db))
 
-        # Coverage bars
+        # Coverage bars: monotonically non-decreasing fill from 0% to 100%.
         if drawable.params:
             for (name, _lo, _hi, progress) in drawable.params:
                 if name in self.bars:
-                    self.bars[name].setValue(int(progress * 100))
+                    value = max(self._bar_max[name], int(round(progress * 100)))
+                    self._bar_max[name] = value
+                    self.bars[name].setValue(value)
 
         # Error readout
         if c is not None and c.calibrated:
@@ -218,6 +244,7 @@ class CalibrationGui(QMainWindow):
         self._worker.start()
 
     def on_calibrate(self):
+        self.calibrate_btn.setText("Calibrating...")
         self._run_async(self.node.do_calibration, "Calibrating...")
 
     def on_commit(self):
@@ -238,9 +265,14 @@ class CalibrationGui(QMainWindow):
 
     @Slot(bool, str)
     def on_calibration_finished(self, ok, msg):
+        self.calibrate_btn.setText("CALIBRATE")
         if ok:
             self.bridge.status.emit("Done")
             self.save_btn.setEnabled(True)
+            c = self.node.c
+            rms = getattr(c, 'calibration_rms', None) if c is not None else None
+            if rms is not None:
+                self.rms_label.setText("Final calibration RMS: %.4f px" % rms)
         else:
             self.bridge.status.emit("Error: " + msg)
             QMessageBox.warning(self, "Calibration error", msg)
