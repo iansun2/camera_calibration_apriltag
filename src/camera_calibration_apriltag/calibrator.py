@@ -27,13 +27,18 @@ those detections, matches each tag to its known 3D position on an
 from io import BytesIO
 import cv2
 import cv_bridge
+import glob
 import math
 import numpy
 import numpy.linalg
+import os
 import sensor_msgs.msg
 import tarfile
 import time
 from enum import Enum
+
+# Minimum number of tags a loaded image must contain to be used as a sample.
+MIN_LOAD_TAGS = 4
 
 
 # Supported camera models
@@ -59,7 +64,10 @@ def _calculate_skew(corners):
     def angle(a, b, c):
         ab = a - b
         cb = c - b
-        return math.acos(numpy.dot(ab, cb) / (numpy.linalg.norm(ab) * numpy.linalg.norm(cb)))
+        denom = numpy.linalg.norm(ab) * numpy.linalg.norm(cb)
+        if denom == 0:
+            return math.pi / 2.   # degenerate -> treat as no skew
+        return math.acos(numpy.clip(numpy.dot(ab, cb) / denom, -1.0, 1.0))
 
     skew = min(1.0, 2. * abs((math.pi / 2.) - angle(up_left, up_right, down_right)))
     return skew
@@ -641,6 +649,37 @@ class MonoCalibrator(Calibrator):
         self.report()
         print(self.ost())
 
+    def add_images(self, directory):
+        """
+        Detect tags in every image in ``directory`` and add them as samples.
+
+        Tags are detected with OpenCV's AprilTag detector (the live detector
+        node is not involved here).  Returns the number of images added.
+        """
+        from camera_calibration_apriltag.tag_detection import detect_tags, make_detector
+        files = sorted(glob.glob(os.path.join(directory, '*.png')) +
+                       glob.glob(os.path.join(directory, '*.jpg')))
+        det = make_detector(self.board.family or '36h11')
+        added = 0
+        for f in files:
+            gray = cv2.imread(f, cv2.IMREAD_GRAYSCALE)
+            if gray is None:
+                continue
+            if self.size is None:
+                self.size = (gray.shape[1], gray.shape[0])
+            tags = {i: c for i, c in detect_tags(gray, detector=det).items()
+                    if self.board.contains(i)}
+            image_points, object_points, ids = self.make_correspondences(tags)
+            if image_points is None or len(ids) < MIN_LOAD_TAGS:
+                continue
+            params = self.get_parameters(image_points, (gray.shape[1], gray.shape[0]))
+            self.db.append((params, gray))
+            self.good_corners.append((image_points, object_points, ids))
+            added += 1
+        self.compute_goodenough()
+        print("Loaded %d images from %s (%d total samples)" % (added, directory, len(self.db)))
+        return added
+
     def do_tarfile_save(self, tf):
         def taradd(name, buf):
             s = BytesIO(buf.encode('utf-8') if isinstance(buf, str) else buf)
@@ -871,6 +910,43 @@ class StereoCalibrator(Calibrator):
         self.calibrated = True
         self.report()
         print(self.ost())
+
+    def add_images(self, directory):
+        """
+        Load left-*/right-* image pairs from ``directory`` as stereo samples.
+
+        Pairs are matched by filename (``left-0007.png`` <-> ``right-0007.png``).
+        Returns the number of pairs added.
+        """
+        from camera_calibration_apriltag.tag_detection import detect_tags, make_detector
+        lefts = sorted(glob.glob(os.path.join(directory, 'left-*.png')) +
+                       glob.glob(os.path.join(directory, 'left-*.jpg')))
+        det = make_detector(self.board.family or '36h11')
+        added = 0
+        for lf in lefts:
+            rf = lf.replace('left-', 'right-')
+            if not os.path.exists(rf):
+                continue
+            lgray = cv2.imread(lf, cv2.IMREAD_GRAYSCALE)
+            rgray = cv2.imread(rf, cv2.IMREAD_GRAYSCALE)
+            if lgray is None or rgray is None:
+                continue
+            if self.size is None:
+                self.size = (lgray.shape[1], lgray.shape[0])
+            ltags = {i: c for i, c in detect_tags(lgray, detector=det).items()
+                     if self.board.contains(i)}
+            rtags = {i: c for i, c in detect_tags(rgray, detector=det).items()
+                     if self.board.contains(i)}
+            lipts, ripts, opts, common = self.match_stereo(ltags, rtags)
+            if lipts is None or len(common) < MIN_LOAD_TAGS:
+                continue
+            params = self.get_parameters(lipts, (lgray.shape[1], lgray.shape[0]))
+            self.db.append((params, lgray, rgray))
+            self.good_corners.append((lipts, ripts, opts, common))
+            added += 1
+        self.compute_goodenough()
+        print("Loaded %d stereo pairs from %s (%d total samples)" % (added, directory, len(self.db)))
+        return added
 
     def do_tarfile_save(self, tf):
         def taradd(name, buf):

@@ -177,6 +177,12 @@ class CalibrationNode(Node):
             self.display_callback(drawable)
 
     # -- calibration actions ------------------------------------------------ #
+    def load_images(self, directory):
+        """Load saved calibration images from a directory and add them as samples."""
+        if self.c is None:
+            self.c = self._make_calibrator(StereoCalibrator if self._stereo else MonoCalibrator)
+        return self.c.add_images(directory)
+
     def do_calibration(self):
         self.c.do_calibration()
 

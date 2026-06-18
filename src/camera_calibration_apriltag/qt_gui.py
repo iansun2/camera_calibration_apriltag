@@ -22,12 +22,12 @@ import cv2
 import numpy
 import rclpy
 
-from PySide6.QtCore import Qt, QObject, Signal, Slot
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtCore import Qt, QObject, QRectF, Signal, Slot
+from PySide6.QtGui import QImage, QPixmap, QPainter, QColor
 from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QLabel, QPushButton, QProgressBar,
-    QComboBox, QSlider, QHBoxLayout, QVBoxLayout, QGridLayout, QGroupBox,
-    QFrame, QMessageBox)
+    QApplication, QMainWindow, QWidget, QLabel, QPushButton,
+    QComboBox, QSlider, QHBoxLayout, QVBoxLayout, QGroupBox,
+    QFrame, QMessageBox, QFileDialog, QSizePolicy)
 
 from camera_calibration_apriltag.calibrator import CAMERA_MODEL, CalibrationException
 
@@ -40,15 +40,74 @@ def numpy_to_qimage(bgr):
     return QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888).copy()
 
 
+def heat_qcolor(t):
+    """Map t in [0,1] to a jet-like color (blue -> cyan -> green -> yellow -> red)."""
+    t = max(0.0, min(1.0, t))
+    if t < 0.25:
+        r, g, b = 0.0, t / 0.25, 1.0
+    elif t < 0.5:
+        r, g, b = 0.0, 1.0, 1.0 - (t - 0.25) / 0.25
+    elif t < 0.75:
+        r, g, b = (t - 0.5) / 0.25, 1.0, 0.0
+    else:
+        r, g, b = 1.0, 1.0 - (t - 0.75) / 0.25, 0.0
+    return QColor(int(r * 255), int(g * 255), int(b * 255))
+
+
+class HeatmapWidget(QWidget):
+    """
+    Grid of cells coloured by a sample count.  Works as a 2D map (rows x cols)
+    or a 1D bar (rows == 1).  Empty cells are drawn dark so gaps in coverage
+    stand out; covered cells run blue -> red with increasing sample density.
+    """
+    EMPTY = QColor(38, 38, 44)
+    GRID = QColor(20, 20, 24)
+
+    def __init__(self, cols, rows, cap=3, parent=None):
+        super().__init__(parent)
+        self.cols = cols
+        self.rows = rows
+        self.cap = cap          # count mapped to the "hot" end of the colormap
+        self.counts = numpy.zeros((rows, cols))
+        self.setMinimumSize(140, 90 if rows > 1 else 26)
+        self.setSizePolicy(QSizePolicy.Expanding,
+                           QSizePolicy.Expanding if rows > 1 else QSizePolicy.Fixed)
+
+    def set_counts(self, counts):
+        self.counts = counts
+        self.update()
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        w, h = self.width(), self.height()
+        cw = w / self.cols
+        ch = h / self.rows
+        for r in range(self.rows):
+            for c in range(self.cols):
+                v = self.counts[r, c]
+                color = self.EMPTY if v <= 0 else heat_qcolor(min(1.0, v / self.cap))
+                p.fillRect(QRectF(c * cw, r * ch, cw, ch), color)
+        p.setPen(self.GRID)
+        for c in range(self.cols + 1):
+            p.drawLine(int(c * cw), 0, int(c * cw), h)
+        for r in range(self.rows + 1):
+            p.drawLine(0, int(r * ch), w, int(r * ch))
+
+
 class RosBridge(QObject):
     """Marshals data from ROS worker threads onto the Qt GUI thread."""
     drawable_ready = Signal(object)
     calibration_finished = Signal(bool, str)
+    images_loaded = Signal(int, str)
     status = Signal(str)
 
 
 class CalibrationGui(QMainWindow):
-    PARAM_NAMES = ["X", "Y", "Size", "Skew"]
+    # Display ranges for the coverage heatmaps.
+    SIZE_RANGE = (0.0, 0.8)     # p_size = sqrt(board area / image area)
+    SKEW_RANGE = (0.0, 0.8)     # apparent skew magnitude, 0 = fronto-parallel
+    XY_COLS, XY_ROWS = 8, 6     # image-position grid
+    BAR_BINS = 14               # bins for the size / skew bars
 
     def __init__(self, node, stereo=False):
         super().__init__()
@@ -56,8 +115,6 @@ class CalibrationGui(QMainWindow):
         self.stereo = stereo
         self.bridge = RosBridge()
 
-        # Coverage bars only ever increase, so remember the best value reached.
-        self._bar_max = {name: 0 for name in self.PARAM_NAMES}
         # Live FPS estimate (exponential moving average of frame intervals).
         self._last_frame_time = None
         self._fps = 0.0
@@ -70,6 +127,7 @@ class CalibrationGui(QMainWindow):
         self.node.display_callback = self.bridge.drawable_ready.emit
         self.bridge.drawable_ready.connect(self.on_drawable)
         self.bridge.calibration_finished.connect(self.on_calibration_finished)
+        self.bridge.images_loaded.connect(self.on_images_loaded)
         self.bridge.status.connect(self.statusBar().showMessage)
 
     # -- UI construction ---------------------------------------------------- #
@@ -103,15 +161,16 @@ class CalibrationGui(QMainWindow):
         panel.addWidget(self.tags_label)
 
         cov_box = QGroupBox("Coverage")
-        cov_grid = QGridLayout(cov_box)
-        self.bars = {}
-        for i, name in enumerate(self.PARAM_NAMES):
-            cov_grid.addWidget(QLabel(name), i, 0)
-            bar = QProgressBar()
-            bar.setRange(0, 100)
-            bar.setValue(0)
-            self.bars[name] = bar
-            cov_grid.addWidget(bar, i, 1)
+        cov_layout = QVBoxLayout(cov_box)
+        cov_layout.addWidget(QLabel("Image position (X-Y)"))
+        self.xy_heat = HeatmapWidget(self.XY_COLS, self.XY_ROWS, cap=3)
+        cov_layout.addWidget(self.xy_heat)
+        cov_layout.addWidget(QLabel("Board size (small/far ← → large/near)"))
+        self.size_heat = HeatmapWidget(self.BAR_BINS, 1, cap=3)
+        cov_layout.addWidget(self.size_heat)
+        cov_layout.addWidget(QLabel("Skew / tilt (flat ← → steep)"))
+        self.skew_heat = HeatmapWidget(self.BAR_BINS, 1, cap=3)
+        cov_layout.addWidget(self.skew_heat)
         panel.addWidget(cov_box)
 
         self.error_label = QLabel("Reprojection error: --")
@@ -137,6 +196,10 @@ class CalibrationGui(QMainWindow):
         self.scale_slider.valueChanged.connect(self.on_scale)
         scale_layout.addWidget(self.scale_slider)
         panel.addWidget(scale_box)
+
+        self.load_btn = QPushButton("LOAD IMAGES...")
+        self.load_btn.clicked.connect(self.on_load_images)
+        panel.addWidget(self.load_btn)
 
         self.calibrate_btn = QPushButton("CALIBRATE")
         self.calibrate_btn.setEnabled(False)
@@ -193,13 +256,7 @@ class CalibrationGui(QMainWindow):
         if c is not None:
             self.samples_label.setText("Samples: %d" % len(c.db))
 
-        # Coverage bars: monotonically non-decreasing fill from 0% to 100%.
-        if drawable.params:
-            for (name, _lo, _hi, progress) in drawable.params:
-                if name in self.bars:
-                    value = max(self._bar_max[name], int(round(progress * 100)))
-                    self._bar_max[name] = value
-                    self.bars[name].setValue(value)
+        self.refresh_coverage()
 
         # Error readout
         if c is not None and c.calibrated:
@@ -218,6 +275,32 @@ class CalibrationGui(QMainWindow):
             self.save_btn.setEnabled(c.calibrated)
             self.commit_btn.setEnabled(c.calibrated and not self._busy())
             self.scale_slider.setEnabled(c.calibrated)
+
+    def refresh_coverage(self):
+        """Rebuild the coverage heatmaps from the collected sample parameters."""
+        c = self.node.c
+        if c is None or not c.db:
+            return
+        params = numpy.array([s[0] for s in c.db])   # (N, 4): px, py, p_size, skew
+        # 2D image-position heatmap
+        xy = numpy.zeros((self.XY_ROWS, self.XY_COLS))
+        gx = numpy.clip((params[:, 0] * self.XY_COLS).astype(int), 0, self.XY_COLS - 1)
+        gy = numpy.clip((params[:, 1] * self.XY_ROWS).astype(int), 0, self.XY_ROWS - 1)
+        for x, y in zip(gx, gy):
+            xy[y, x] += 1
+        self.xy_heat.set_counts(xy)
+        # 1D size / skew bars
+        self.size_heat.set_counts(self._bin1d(params[:, 2], self.SIZE_RANGE))
+        self.skew_heat.set_counts(self._bin1d(params[:, 3], self.SKEW_RANGE))
+
+    def _bin1d(self, values, value_range):
+        lo, hi = value_range
+        out = numpy.zeros((1, self.BAR_BINS))
+        idx = numpy.clip(((values - lo) / (hi - lo) * self.BAR_BINS).astype(int),
+                         0, self.BAR_BINS - 1)
+        for i in idx:
+            out[0, i] += 1
+        return out
 
     def _busy(self):
         return getattr(self, '_worker', None) is not None and self._worker.is_alive()
@@ -254,6 +337,43 @@ class CalibrationGui(QMainWindow):
             else:
                 raise CalibrationException("Failed to upload calibration (see log)")
         self._run_async(commit, "Uploading calibration...")
+
+    def on_load_images(self):
+        if self._busy():
+            return
+        directory = QFileDialog.getExistingDirectory(
+            self, "Select folder of calibration images")
+        if not directory:
+            return
+        self.load_btn.setEnabled(False)
+        self.bridge.status.emit("Loading images from %s ..." % directory)
+
+        def worker():
+            try:
+                n = self.node.load_images(directory)
+                self.bridge.images_loaded.emit(n, "")
+            except Exception as e:  # noqa: BLE001
+                self.bridge.images_loaded.emit(-1, repr(e))
+
+        self._worker = threading.Thread(target=worker, daemon=True)
+        self._worker.start()
+
+    @Slot(int, str)
+    def on_images_loaded(self, n, err):
+        self.load_btn.setEnabled(True)
+        if n < 0:
+            self.bridge.status.emit("Load failed: " + err)
+            QMessageBox.warning(self, "Load failed", err)
+            return
+        c = self.node.c
+        self.samples_label.setText("Samples: %d" % (len(c.db) if c else 0))
+        self.refresh_coverage()
+        if c is not None:
+            self.calibrate_btn.setEnabled(c.goodenough)
+        self.bridge.status.emit("Loaded %d images" % n)
+        QMessageBox.information(self, "Images loaded",
+                               "Added %d images. Total samples: %d"
+                               % (n, len(c.db) if c else 0))
 
     def on_save(self):
         try:
