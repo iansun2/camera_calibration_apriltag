@@ -43,12 +43,18 @@ from rclpy.time import Duration, Time
 import tf2_ros
 from tf2_ros import Buffer, TransformListener
 
+from camera_calibration_apriltag.calibrator import CORNER_PERMS
 from camera_calibration_apriltag.careye_hand_eye import transform_to_Rt
 
 try:
     from queue import Queue
 except ImportError:  # pragma: no cover
     from Queue import Queue
+
+
+# A frame's homography residual (board plane -> image) below this many pixels
+# means the chosen per-tag corner order is correct; lock it from then on.
+CORNER_PERM_LOCK_PX = 5.0
 
 
 class SpinThread(threading.Thread):
@@ -128,6 +134,9 @@ class CarEyeCalibrationNode(Node):
         # Length of the drawn pose axes (meters): roughly half the board.
         self._axis_len = max(board.tag_size,
                              0.5 * max(board.n_cols, board.n_rows) * board.tag_spacing)
+        # Per-tag corner ordering matching the detector's convention; chosen
+        # automatically on the first good multi-tag view, then locked.
+        self._corner_perm = None
 
         # Hook set by the GUI; called with a CarEyeFrame for every frame.
         self.display_callback = None
@@ -207,26 +216,43 @@ class CarEyeCalibrationNode(Node):
                 return None
             K, D = self._K, self._D
 
-        obj_pts = []
-        img_pts = []
-        n = 0
+        obj_groups = []   # (n, 4, 3) board points, one group of 4 per tag
+        img_groups = []   # (n, 4, 2) detector corners, same order
         for det in detections:
             if self._board.family and det.family != self._board.family:
                 continue
             board_pts = self._board.object_points_for_tag(det.id)
             if board_pts is None:
                 continue
-            n += 1
-            for k in range(4):
-                obj_pts.append(board_pts[k])
-                img_pts.append((det.corners[k].x, det.corners[k].y))
+            obj_groups.append(board_pts)
+            img_groups.append([(c.x, c.y) for c in det.corners])
+        n = len(obj_groups)
         if n < self._min_tags:
             return None
         if self._require_all_tags and n < self._board.num_tags:
             return None
 
-        obj = np.array(obj_pts, dtype=np.float64).reshape(-1, 3)
-        img = np.array(img_pts, dtype=np.float64).reshape(-1, 2)
+        obj_groups = np.array(obj_groups, dtype=np.float64).reshape(n, 4, 3)
+        img_groups = np.array(img_groups, dtype=np.float64).reshape(n, 4, 2)
+
+        # The detector's corner convention may not match the board's object
+        # points; the wrong per-tag order is non-rigid and wrecks the PnP fit
+        # (tens of pixels of reprojection error).  Auto-detect it once.
+        perm = self._corner_perm
+        if perm is None:
+            if n < 2:
+                # A single tag's 4 points fit any homography exactly, so the
+                # order is ambiguous; wait for a multi-tag view.
+                return None
+            perm, hres = self._best_corner_perm(obj_groups, img_groups)
+            if hres < CORNER_PERM_LOCK_PX:
+                self._corner_perm = perm
+                self.get_logger().info(
+                    "locked detector corner order %s (homography residual "
+                    "%.3f px)" % (perm, hres))
+
+        obj = obj_groups[:, perm, :].reshape(-1, 3)
+        img = img_groups.reshape(-1, 2)
         ok, rvec, tvec = cv2.solvePnP(obj, img, K, D,
                                       flags=cv2.SOLVEPNP_ITERATIVE)
         if not ok:
@@ -238,6 +264,30 @@ class CarEyeCalibrationNode(Node):
         R, _ = cv2.Rodrigues(rvec)
         return {'R': R, 't': tvec.reshape(3), 'rvec': rvec, 'tvec': tvec,
                 'num_tags': n, 'reproj': reproj}
+
+    def _best_corner_perm(self, obj_groups, img_groups):
+        """
+        Pick the per-tag corner permutation that best matches the detector.
+
+        The board is planar, so the correct ordering admits a single
+        board-plane -> image homography with small residual, while wrong
+        orderings (which mis-pair corners within each tag) do not.
+
+        :returns: (perm, homography_residual_px)
+        """
+        ip = img_groups.reshape(-1, 2).astype(np.float32)
+        best_perm, best_err = CORNER_PERMS[0], float('inf')
+        for perm in CORNER_PERMS:
+            op = obj_groups[:, perm, :2].reshape(-1, 2).astype(np.float32)
+            H, _ = cv2.findHomography(op, ip, 0)
+            if H is None:
+                continue
+            proj = cv2.perspectiveTransform(
+                op.reshape(-1, 1, 2).astype(np.float64), H).reshape(-1, 2)
+            err = float(np.sqrt(np.mean(np.sum((proj - ip) ** 2, axis=1))))
+            if err < best_err:
+                best_perm, best_err = perm, err
+        return best_perm, best_err
 
     def _draw_overlay(self, bgr, detections, pose):
         """Draw detected tag outlines/ids and the grid pose axes onto ``bgr``."""
