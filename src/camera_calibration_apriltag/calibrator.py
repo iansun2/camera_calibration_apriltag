@@ -163,6 +163,21 @@ class StereoDrawable(ImageDrawable):
         self.num_tags = 0
 
 
+# Candidate per-tag corner orderings, tried at calibration time so the result
+# is independent of the detector's corner convention. The first 4 are the cyclic
+# rotations, the last 4 add a flip (reflection). The correct one yields by far
+# the lowest reprojection error; the wrong ones are non-rigid and fit badly.
+CORNER_PERMS = [
+    (0, 1, 2, 3), (1, 2, 3, 0), (2, 3, 0, 1), (3, 0, 1, 2),
+    (0, 3, 2, 1), (3, 2, 1, 0), (2, 1, 0, 3), (1, 0, 3, 2),
+]
+
+
+def permute_objpoints(opts, perm):
+    """Reorder object points within each group of 4 (one tag) by ``perm``."""
+    return opts.reshape(-1, 4, 3)[:, perm, :].reshape(-1, 1, 3)
+
+
 # --------------------------------------------------------------------------- #
 # Calibrator base class
 # --------------------------------------------------------------------------- #
@@ -193,7 +208,32 @@ class Calibrator():
         self.expected_tags = board.num_tags
         # RMS reprojection error reported by the solver after calibration.
         self.calibration_rms = None
+        # Per-tag corner permutation chosen automatically at calibration time.
+        self.corner_perm = None
         self.size = None
+
+    def select_corner_perm(self, opts, ipts):
+        """
+        Find the per-tag corner ordering that best matches the detector output.
+
+        Runs a fast pinhole calibration for each candidate permutation and
+        returns the one with the lowest RMS reprojection error.  This makes the
+        result independent of whichever corner convention the AprilTag detector
+        uses.
+        """
+        best_perm, best_rms = CORNER_PERMS[0], float('inf')
+        for perm in CORNER_PERMS:
+            opts_p = [permute_objpoints(o, perm) for o in opts]
+            try:
+                rms, _, _, _, _ = cv2.calibrateCamera(
+                    opts_p, ipts, self.size, numpy.eye(3), None,
+                    flags=cv2.CALIB_FIX_K3)
+            except cv2.error:
+                continue
+            if rms < best_rms:
+                best_perm, best_rms = perm, rms
+        print("auto-selected corner order %s (RMS=%.4f px)" % (best_perm, best_rms))
+        return best_perm
 
     def enough_tags_for_sample(self, num_tags):
         """True if a view with ``num_tags`` matched tags may become a sample."""
@@ -447,6 +487,10 @@ class MonoCalibrator(Calibrator):
         opts = list(opts)
         ipts = list(ipts)
 
+        # Pick the corner ordering that matches the detector, then apply it.
+        self.corner_perm = self.select_corner_perm(opts, ipts)
+        opts = [permute_objpoints(o, self.corner_perm) for o in opts]
+
         if self.camera_model == CAMERA_MODEL.PINHOLE:
             print("mono pinhole calibration...")
             reproj_err, self.intrinsics, dist_coeffs, rvecs, tvecs = cv2.calibrateCamera(
@@ -519,6 +563,8 @@ class MonoCalibrator(Calibrator):
         """RMS reprojection error in pixels for a single view, using solvePnP."""
         if image_points is None or len(image_points) < 4:
             return None
+        if self.corner_perm is not None:
+            object_points = permute_objpoints(object_points, self.corner_perm)
         try:
             ok, rvec, tvec = cv2.solvePnP(object_points, image_points,
                                           self.intrinsics, self.distortion)
@@ -668,6 +714,10 @@ class StereoCalibrator(Calibrator):
         opts = list(opts)
         lipts = list(lipts)
         ripts = list(ripts)
+
+        # Match the detector's corner ordering for the stereo solve too.
+        self.corner_perm = self.select_corner_perm(opts, lipts)
+        opts = [permute_objpoints(o, self.corner_perm) for o in opts]
 
         self.T = numpy.zeros((3, 1), dtype=numpy.float64)
         self.R = numpy.eye(3, dtype=numpy.float64)
