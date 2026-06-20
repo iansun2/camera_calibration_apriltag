@@ -44,7 +44,7 @@ import tf2_ros
 from tf2_ros import Buffer, TransformListener
 
 from camera_calibration_apriltag.calibrator import CORNER_PERMS
-from camera_calibration_apriltag.careye_hand_eye import transform_to_Rt
+from camera_calibration_apriltag.careye_hand_eye import Rt_to_matrix, transform_to_Rt
 
 try:
     from queue import Queue
@@ -111,6 +111,9 @@ class CarEyeFrame:
         # Grid pose in the camera optical frame (camera_T_grid).
         self.grid_t = (0.0, 0.0, 0.0)            # translation x,y,z (m)
         self.grid_rpy = (0.0, 0.0, 0.0)          # roll,pitch,yaw (rad)
+        # Full 4x4 poses for the 3D viewer (None until available).
+        self.base_T = None         # odom_T_base_link
+        self.grid_T_cam = None     # camera_T_grid
 
 
 class CarEyeCalibrationNode(Node):
@@ -372,6 +375,8 @@ class CarEyeCalibrationNode(Node):
         frame.base_x = float(t_g2b[0])
         frame.base_y = float(t_g2b[1])
         frame.base_yaw = float(yaw)
+        frame.base_T = Rt_to_matrix(R_g2b, t_g2b)
+        frame.grid_T_cam = Rt_to_matrix(R_t2c, t_t2c)
 
         candidate = {
             'g2b': (R_g2b, t_g2b),

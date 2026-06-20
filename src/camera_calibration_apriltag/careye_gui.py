@@ -20,15 +20,18 @@ import threading
 
 import numpy
 import rclpy
+import transforms3d as tfs
 from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import (QApplication, QDoubleSpinBox, QFormLayout, QFrame,
-                               QGroupBox, QHBoxLayout, QLabel, QMainWindow,
-                               QPushButton, QSizePolicy, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QCheckBox, QDoubleSpinBox,
+                               QFormLayout, QFrame, QGridLayout, QGroupBox,
+                               QHBoxLayout, QLabel, QMainWindow, QPushButton,
+                               QSizePolicy, QTabWidget, QVBoxLayout, QWidget)
 
 from camera_calibration_apriltag.careye_hand_eye import (
-    MIN_SAMPLES, compute_residual, matrix_to_transform_tuple,
+    MIN_SAMPLES, Rt_to_matrix, compute_residual, matrix_to_transform_tuple,
     rotation_axis_rank, solve_hand_eye)
+from camera_calibration_apriltag.careye_viewer3d import Viewer3D
 # Reuse the colormap, heatmap cell renderer and image converter from the
 # intrinsics GUI.
 from camera_calibration_apriltag.qt_gui import (
@@ -165,6 +168,13 @@ class CarEyeGui(QMainWindow):
         self.bridge = RosBridge()
         self._last_frame = None
 
+        # 3D manual-calibration page state.
+        self._X_manual = numpy.eye(4)        # base_link -> camera (editable)
+        self._live_base_T = None             # odom -> base_link
+        self._live_grid_T_cam = None         # camera -> grid
+        self._pins = []                      # frozen raw {base, grid} snapshots
+        self.MAX_PINS = 3
+
         self.setWindowTitle("Car-Eye Calibration")
         self._build_ui()
 
@@ -181,6 +191,14 @@ class CarEyeGui(QMainWindow):
 
     # -- UI construction ---------------------------------------------------- #
     def _build_ui(self):
+        tabs = QTabWidget()
+        tabs.addTab(self._build_calibrate_page(), "Calibrate")
+        tabs.addTab(self._build_manual_page(), "3D Manual")
+        self.setCentralWidget(tabs)
+        self.statusBar()
+        self._result = None
+
+    def _build_calibrate_page(self):
         central = QWidget()
         root = QHBoxLayout(central)
 
@@ -261,6 +279,11 @@ class CarEyeGui(QMainWindow):
         speed_form.addRow("Max linear:", self.max_linear)
         speed_form.addRow("Max angular:", self.max_angular)
         joy_layout.addLayout(speed_form)
+        self.chk_stop_cmd = QCheckBox("Stop sending cmd_vel")
+        self.chk_stop_cmd.setToolTip(
+            "Hold the robot still: stop publishing joystick velocity commands")
+        self.chk_stop_cmd.toggled.connect(self._on_stop_cmd)
+        joy_layout.addWidget(self.chk_stop_cmd)
         right.addWidget(joy_box, 1)
 
         action_box = QGroupBox("Calibration")
@@ -293,19 +316,133 @@ class CarEyeGui(QMainWindow):
         right.addWidget(action_box, 1)
 
         root.addLayout(right, 1)
-        self.setCentralWidget(central)
-        self.statusBar()
-        self._result = None
+        return central
+
+    def _build_manual_page(self):
+        page = QWidget()
+        root = QHBoxLayout(page)
+
+        # Left column: image, live poses, extrinsic, nudges, actions.
+        left = QVBoxLayout()
+
+        img_box = QGroupBox("Camera")
+        img_lay = QVBoxLayout(img_box)
+        self.m_image = QLabel("no image")
+        self.m_image.setAlignment(Qt.AlignCenter)
+        self.m_image.setFixedSize(260, 195)
+        self.m_image.setFrameShape(QFrame.Box)
+        img_lay.addWidget(self.m_image)
+        left.addWidget(img_box)
+
+        pose_box = QGroupBox("Live poses (in odom)")
+        pose_form = QFormLayout(pose_box)
+        self.m_base_pose = QLabel("-")
+        self.m_board_pose = QLabel("-")
+        pose_form.addRow("base_link:", self.m_base_pose)
+        pose_form.addRow("board:", self.m_board_pose)
+        left.addWidget(pose_box)
+
+        ext_box = QGroupBox("Manual extrinsic (base_link → camera)")
+        ext_form = QFormLayout(ext_box)
+        self._ext_spins = {}
+        for key, suffix, lo, hi, step, dec in (
+                ('x', ' m', -10.0, 10.0, 0.001, 4),
+                ('y', ' m', -10.0, 10.0, 0.001, 4),
+                ('z', ' m', -10.0, 10.0, 0.001, 4),
+                ('roll', ' °', -180.0, 180.0, 0.5, 2),
+                ('pitch', ' °', -180.0, 180.0, 0.5, 2),
+                ('yaw', ' °', -180.0, 180.0, 0.5, 2)):
+            sp = QDoubleSpinBox()
+            sp.setRange(lo, hi)
+            sp.setSingleStep(step)
+            sp.setDecimals(dec)
+            sp.setSuffix(suffix)
+            self._ext_spins[key] = sp
+            ext_form.addRow(key + ':', sp)
+        left.addWidget(ext_box)
+
+        nudge_box = QGroupBox("Nudge (relative)")
+        nudge_grid = QGridLayout(nudge_box)
+        self.pos_step = QDoubleSpinBox()
+        self.pos_step.setRange(0.001, 1.0)
+        self.pos_step.setSingleStep(0.005)
+        self.pos_step.setDecimals(3)
+        self.pos_step.setValue(0.01)
+        self.pos_step.setSuffix(" m")
+        self.rot_step = QDoubleSpinBox()
+        self.rot_step.setRange(0.1, 45.0)
+        self.rot_step.setSingleStep(0.5)
+        self.rot_step.setDecimals(1)
+        self.rot_step.setValue(1.0)
+        self.rot_step.setSuffix(" °")
+        nudge_grid.addWidget(QLabel("pos step:"), 0, 0)
+        nudge_grid.addWidget(self.pos_step, 0, 1)
+        nudge_grid.addWidget(QLabel("rot step:"), 0, 2)
+        nudge_grid.addWidget(self.rot_step, 0, 3)
+        for col, (key, sign, txt) in enumerate((
+                ('x', -1, '-X'), ('x', 1, '+X'),
+                ('y', -1, '-Y'), ('y', 1, '+Y'),
+                ('z', -1, '-Z'), ('z', 1, '+Z'))):
+            b = QPushButton(txt)
+            b.clicked.connect(lambda _=False, k=key, s=sign: self._nudge(k, s, True))
+            nudge_grid.addWidget(b, 1, col)
+        for col, (key, sign, txt) in enumerate((
+                ('roll', -1, '-R'), ('roll', 1, '+R'),
+                ('pitch', -1, '-P'), ('pitch', 1, '+P'),
+                ('yaw', -1, '-Yw'), ('yaw', 1, '+Yw'))):
+            b = QPushButton(txt)
+            b.clicked.connect(lambda _=False, k=key, s=sign: self._nudge(k, s, False))
+            nudge_grid.addWidget(b, 2, col)
+        left.addWidget(nudge_box)
+
+        btn_row = QHBoxLayout()
+        self.btn_pin = QPushButton("Pin (0/%d)" % self.MAX_PINS)
+        self.btn_pin.setToolTip("Freeze the current base_link + board into the "
+                                "viewport as a reference (up to %d)" % self.MAX_PINS)
+        self.btn_pin.clicked.connect(self.on_add_pin)
+        self.btn_clear_pins = QPushButton("Clear pins")
+        self.btn_clear_pins.clicked.connect(self.on_clear_pins)
+        self.btn_clear_pins.setEnabled(False)
+        btn_row.addWidget(self.btn_pin)
+        btn_row.addWidget(self.btn_clear_pins)
+        left.addLayout(btn_row)
+
+        self.btn_save_manual = QPushButton("Save extrinsic")
+        self.btn_save_manual.clicked.connect(self.on_save_manual)
+        left.addWidget(self.btn_save_manual)
+        left.addStretch(1)
+
+        root.addLayout(left)
+
+        # Right: the 3D viewer.
+        self.viewer = Viewer3D()
+        root.addWidget(self.viewer, 1)
+
+        # Connect extrinsic spinboxes only after construction so setting
+        # initial values doesn't fire premature recomputes.
+        for sp in self._ext_spins.values():
+            sp.valueChanged.connect(self._on_extrinsic_changed)
+        self._update_scene()
+        return page
 
     # -- joystick / cmd_vel ------------------------------------------------- #
     def _on_joystick(self, jx, jy):
         self._joy = (jx, jy)
 
     def _send_cmd(self):
+        if self.chk_stop_cmd.isChecked():
+            return
         jx, jy = self._joy
         linear = jy * self.max_linear.value()
         angular = -jx * self.max_angular.value()   # left = positive yaw
         self.node.publish_cmd(linear, angular)
+
+    def _on_stop_cmd(self, stopped):
+        # When enabling the stop, send one zero so the robot halts immediately;
+        # then _send_cmd suppresses further commands.
+        self.joystick.setEnabled(not stopped)
+        if stopped:
+            self.node.stop()
 
     # -- detection frames --------------------------------------------------- #
     def on_frame(self, frame):
@@ -330,11 +467,105 @@ class CarEyeGui(QMainWindow):
                                      math.degrees(frame.base_yaw)))
         self.btn_sample.setEnabled(frame.have_pose)
 
-    def _show_image(self, bgr):
+        # Feed the 3D manual-calibration page.
+        if frame.image is not None:
+            self._show_image(frame.image, self.m_image)
+        if frame.have_pose:
+            self._live_base_T = frame.base_T
+            self._live_grid_T_cam = frame.grid_T_cam
+            self._update_scene()
+
+    def _show_image(self, bgr, label=None):
+        label = label or self.image_label
         qimg = numpy_to_qimage(bgr)
         pix = QPixmap.fromImage(qimg).scaled(
-            self.image_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        self.image_label.setPixmap(pix)
+            label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        label.setPixmap(pix)
+
+    # -- 3D manual-calibration page ----------------------------------------- #
+    def _extrinsic_matrix(self):
+        s = self._ext_spins
+        R = tfs.euler.euler2mat(math.radians(s['roll'].value()),
+                                math.radians(s['pitch'].value()),
+                                math.radians(s['yaw'].value()), axes='sxyz')
+        return Rt_to_matrix(R, [s['x'].value(), s['y'].value(), s['z'].value()])
+
+    def _on_extrinsic_changed(self):
+        self._X_manual = self._extrinsic_matrix()
+        self._update_scene()
+
+    def _nudge(self, key, sign, is_pos):
+        step = self.pos_step.value() if is_pos else self.rot_step.value()
+        sp = self._ext_spins[key]
+        sp.setValue(sp.value() + sign * step)   # fires _on_extrinsic_changed
+
+    def _scene_frames(self, base, grid, suffix=''):
+        """Build [(pose4x4, label, scale)] for base_link, camera and board."""
+        frames = []
+        if base is None:
+            return frames
+        frames.append((base, 'base_link' + suffix, 1.0))
+        cam = base @ self._X_manual
+        frames.append((cam, 'camera' + suffix, 0.7))
+        if grid is not None:
+            frames.append((cam @ grid, 'board' + suffix, 1.0))
+        return frames
+
+    def _update_scene(self):
+        live = [(numpy.eye(4), 'odom', 1.3)] + self._scene_frames(
+            self._live_base_T, self._live_grid_T_cam)
+        self.viewer.set_live(live)
+        # Pinned snapshots recomputed with the current extrinsic, so tuning the
+        # extrinsic moves their boards too and you can seek overlap.
+        pins = []
+        for i, pin in enumerate(self._pins):
+            pf = self._scene_frames(pin['base'], pin['grid'], ' (pin%d)' % (i + 1))
+            if pf:
+                pins.append(pf)
+        self.viewer.set_pins(pins)
+        # Live pose readouts (in odom).
+        base = self._live_base_T
+        self.m_base_pose.setText(self._fmt_pose(base) if base is not None else '-')
+        if base is not None and self._live_grid_T_cam is not None:
+            board = base @ self._X_manual @ self._live_grid_T_cam
+            self.m_board_pose.setText(self._fmt_pose(board))
+        else:
+            self.m_board_pose.setText('-')
+
+    @staticmethod
+    def _fmt_pose(T):
+        x, y, z = T[:3, 3]
+        r, pch, yw = numpy.degrees(tfs.euler.mat2euler(T[:3, :3], axes='sxyz'))
+        return "%.3f, %.3f, %.3f m | %.1f, %.1f, %.1f °" % (x, y, z, r, pch, yw)
+
+    def on_add_pin(self):
+        if self._live_base_T is None:
+            self.statusBar().showMessage("No live base_link pose to pin.", 3000)
+            return
+        if len(self._pins) >= self.MAX_PINS:
+            self.statusBar().showMessage(
+                "Already at %d pins; clear some first." % self.MAX_PINS, 3000)
+            return
+        grid = self._live_grid_T_cam
+        self._pins.append({'base': self._live_base_T.copy(),
+                           'grid': None if grid is None else grid.copy()})
+        self._refresh_pin_buttons()
+        self._update_scene()
+
+    def on_clear_pins(self):
+        self._pins = []
+        self._refresh_pin_buttons()
+        self._update_scene()
+
+    def _refresh_pin_buttons(self):
+        n = len(self._pins)
+        self.btn_pin.setText("Pin (%d/%d)" % (n, self.MAX_PINS))
+        self.btn_pin.setEnabled(n < self.MAX_PINS)
+        self.btn_clear_pins.setEnabled(n > 0)
+
+    def on_save_manual(self):
+        path = save_calibration(self.node, self._X_manual)
+        self.statusBar().showMessage("Saved manual extrinsic to %s" % path, 5000)
 
     def _refresh_coverage(self):
         positions = self.node.sample_positions()
@@ -464,7 +695,7 @@ def run_gui(node):
 
     app = QApplication.instance() or QApplication([])
     gui = CarEyeGui(node)
-    gui.resize(820, 620)
+    gui.resize(1120, 720)
     gui.show()
 
     spin = SpinThread(node)

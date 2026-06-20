@@ -156,7 +156,9 @@ detections.
   (xyz + roll/pitch/yaw), grid range, PnP reprojection error, sample count.
 - **Drive (cmd_vel)** — a virtual **joystick**: forward/back → `linear.x`,
   left/right → `angular.z`, scaled by the adjustable **Max linear** / **Max
-  angular** spin boxes (differential drive).
+  angular** spin boxes (differential drive). The **Stop sending cmd_vel**
+  checkbox halts the robot (sends one zero) and suppresses further commands
+  until unchecked.
 - **TAKE SAMPLE / Remove last / CALIBRATE / SAVE RESULT** — accumulate
   samples, solve, and write `/tmp/careye_calibration.yaml` (quaternion, RPY,
   and a ready-to-paste `static_transform_publisher` line). The result shows the
@@ -169,6 +171,34 @@ detections.
   (`odom → base_link`, translation + quaternion) and the AprilTag detections
   (id + 4 image corners). Enough to re-run PnP and the hand-eye solve without a
   live system.
+
+The GUI has two tabs: **Calibrate** (everything above) and **3D Manual**.
+
+### 3D Manual tab
+
+An interactive 3D viewer for dialling in the extrinsic by hand and checking it
+visually. The world centre is `odom`.
+
+- **3D viewport** — an X-Y ground grid (10 cm cells) with coordinate triads
+  (X red, Y green, Z blue) for `odom`, the live `base_link`, the `camera`, and
+  the AprilGrid `board`. Left-drag orbits, right-drag pans, the wheel zooms.
+  The `board` is drawn as `base_link · X · camera_T_grid`, where `X` is the
+  manual extrinsic — so if `X` is right, the board sits at the same place in
+  `odom` no matter where the car is.
+- **Manual extrinsic (base_link → camera)** — six fully editable fields
+  (x/y/z, roll/pitch/yaw); the scene updates live as you type.
+- **Nudge (relative)** — `±X/±Y/±Z` and `±R/±P/±Yw` buttons that step the
+  extrinsic by adjustable position/rotation increments (separate position and
+  rotation steps).
+- **Pin / Clear pins** — freeze the current base/board into the viewport as a
+  static reference (up to **3**, labelled `pin1`..`pin3`); **Clear pins**
+  removes them. Each pin stores the raw inputs and is re-rendered through the
+  current extrinsic, so as you tune `X` the live and pinned boards all move —
+  adjust until they overlap.
+- **Live poses** — read-out of `base_link` and `board` poses in `odom`.
+- **Camera** — a small live image view.
+- **Save extrinsic** — write the manual `base_link → camera` transform to
+  `/tmp/careye_calibration.yaml` (same format as **SAVE RESULT**).
 
 ### Quick start
 
